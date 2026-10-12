@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Read-only monitoring and explicit model controls for local llama.cpp. Stdlib only."""
+import argparse
+import concurrent.futures
+import csv
+import fcntl
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class BackendError(Exception):
+    pass
+
+
+def option(args, *names, default=None):
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                return args[i + 1]
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+    return default
+
+
+def processes(proc=Path("/proc")):
+    result = []
+    for directory in proc.glob("[0-9]*"):
+        try:
+            if directory.stat().st_uid != os.getuid():
+                continue
+            args = directory.joinpath("cmdline").read_bytes().decode(errors="replace").strip("\0").split("\0")
+            if Path(args[0]).name not in ("llama-server", "llama-server.exe"):
+                continue
+            status = directory.joinpath("status").read_text()
+            rss = re.search(r"^VmRSS:\s+(\d+)", status, re.M)
+            ppid = re.search(r"^PPid:\s+(\d+)", status, re.M)
+            result.append({"pid": int(directory.name), "ppid": int(ppid[1]) if ppid else 0,
+                           "rss_bytes": int(rss[1]) * 1024 if rss else 0,
+                           "port": option(args, "--port", default="8080"),
+                           "host": option(args, "--host", default="127.0.0.1"),
+                           "router": any(a.split("=")[0] in ("--models-preset", "--models-dir") for a in args)})
+        except (OSError, IndexError, ValueError):
+            continue
+    return result
+
+
+def validate_endpoint(value):
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise BackendError("Invalid server URL") from exc
+    if (parsed.scheme not in ("http", "https") or parsed.hostname not in ("localhost", "127.0.0.1", "::1")
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in ("", "/") or port == 0):
+        raise BackendError("Use a loopback server URL, for example http://127.0.0.1:8080")
+    return value.rstrip("/")
+
+
+def discover(value, procs):
+    if value != "auto":
+        return validate_endpoint(value)
+    # Router parents before their dynamically assigned worker ports.
+    ordered = sorted(procs, key=lambda p: (not p["router"], p["ppid"] in {x["pid"] for x in procs}, p["pid"]))
+    for process in ordered:
+        if process["host"] in ("127.0.0.1", "localhost", "0.0.0.0", "::", "::1"):
+            host = "[::1]" if ":" in process["host"] else "127.0.0.1"
+            return validate_endpoint(f"http://{host}:{process['port']}")
+    return "http://127.0.0.1:8080"
+
+
+class Client:
+    def __init__(self, endpoint):
+        self.endpoint = validate_endpoint(endpoint)
+        # Local requests must not leak to an HTTP_PROXY or follow redirects.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+    def request(self, path, payload=None, timeout=2, raw=False):
+        headers = {"Accept": "text/plain" if raw else "application/json"}
+        key = os.environ.get("LLAMA_LOCAL_API_KEY")
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.endpoint + path, data=data, headers=headers)
+        try:
+            with self.opener.open(request, timeout=timeout) as response:
+                body = response.read(4 * 1024 * 1024).decode()
+            return body if raw else json.loads(body)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise BackendError("Server requires authentication; set LLAMA_LOCAL_API_KEY for the shell") from exc
+            raise BackendError(f"{path.split('?')[0]} returned HTTP {exc.code}") from exc
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            raise BackendError(f"Cannot read {path.split('?')[0]}: {exc}") from exc
+
+
+def parse_metrics(body):
+    metrics = {}
+    for line in body.splitlines():
+        match = re.fullmatch(r"llamacpp:([a-zA-Z0-9_]+)(?:\{[^}]*\})?\s+([^\s]+)(?:\s+\d+)?", line.strip())
+        if match:
+            try:
+                value = float(match[2])
+                if math.isfinite(value):
+                    metrics[match[1]] = metrics.get(match[1], 0) + value
+            except ValueError:
+                pass
+    return metrics
+
+
+def number(value):
+    try:
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def read_number(path, divisor=1):
+    try:
+        value = number(path.read_text().strip())
+        return value / divisor if value is not None else None
+    except OSError:
+        return None
+
+
+def hardware():
+    devices = []
+    try:
+        response = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,power.draw,memory.used,memory.total,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2, check=True)
+        for row in csv.reader(io.StringIO(response.stdout), skipinitialspace=True):
+            if len(row) != 6:
+                continue
+            name, power, used, total, util, temp = row
+            devices.append({"name": name, "power_w": number(power),
+                            "vram_used_bytes": (number(used) * 1048576 if number(used) is not None else None),
+                            "vram_total_bytes": (number(total) * 1048576 if number(total) is not None else None),
+                            "util_percent": number(util), "temperature_c": number(temp)})
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # AMD/Intel sensors exposed by the kernel; absent or unreadable values stay null.
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        if not re.fullmatch(r"card\d+", card.name):
+            continue
+        device = card / "device"
+        try:
+            vendor = (device / "vendor").read_text().strip()
+        except OSError:
+            continue
+        if vendor not in ("0x1002", "0x8086"):
+            continue
+        sensors = list((device / "hwmon").glob("hwmon*"))
+        sensor = sensors[0] if sensors else device
+        power = read_number(sensor / "power1_average", 1e6)
+        if power is None:
+            power = read_number(sensor / "power1_input", 1e6)
+        devices.append({"name": ("AMD " if vendor == "0x1002" else "Intel ") + card.name,
+                        "power_w": power, "vram_used_bytes": read_number(device / "mem_info_vram_used"),
+                        "vram_total_bytes": read_number(device / "mem_info_vram_total"),
+                        "util_percent": read_number(device / "gpu_busy_percent"),
+                        "temperature_c": read_number(sensor / "temp1_input", 1000)})
+    return devices
+
+
+def memory(procs, endpoint):
+    info = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            info[key] = int(value.split()[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    port = str(urllib.parse.urlsplit(endpoint).port or (443 if endpoint.startswith("https:") else 80))
+    pids = {p["pid"] for p in procs if p["port"] == port}
+    while True:
+        expanded = pids | {p["pid"] for p in procs if p["ppid"] in pids}
+        if expanded == pids:
+            break
+        pids = expanded
+    return {"total_bytes": info.get("MemTotal"),
+            "used_bytes": info["MemTotal"] - info["MemAvailable"] if "MemAvailable" in info else None,
+            "server_rss_bytes": sum(p["rss_bytes"] for p in procs if p["pid"] in pids) if pids else None}
+
+
+def model_stats(client, model, router):
+    query = "?" + urllib.parse.urlencode({"model": model["id"], "autoload": "false"}) if router else ""
+    stats = {"slots": [], "metrics": {}, "notes": []}
+    try:
+        slots = client.request("/slots" + query)
+        if isinstance(slots, list):
+            stats["slots"] = [{"id": s.get("id"), "busy": bool(s.get("is_processing")),
+                               "prompt_tokens": s.get("n_prompt_tokens"), "context_size": s.get("n_ctx")}
+                              for s in slots]
+    except BackendError:
+        stats["notes"].append("Slot information unavailable (enable --slots).")
+    try:
+        stats["metrics"] = parse_metrics(client.request("/metrics" + query, raw=True))
+        if not stats["metrics"]:
+            stats["notes"].append("No token metrics reported yet.")
+    except BackendError:
+        stats["notes"].append("Token totals / throughput unavailable. Enable --metrics on this model's server.")
+    return stats
+
+
+def catalog(client):
+    props = client.request("/props")
+    router = props.get("role") == "router"
+    response = client.request("/models" if router else "/v1/models")
+    models = []
+    for item in response.get("data", []):
+        status = item.get("status", {})
+        models.append({"id": item["id"], "state": status.get("value", "loaded"),
+                       "failed": bool(status.get("failed")),
+                       "context_size": item.get("meta", {}).get("n_ctx"),
+                       "size_bytes": item.get("meta", {}).get("size")})
+    return router, models
+
+
+def snapshot(endpoint="auto"):
+    procs = processes()
+    endpoint = discover(endpoint, procs)
+    result = {"endpoint": endpoint, "online": False, "router": False, "models": [], "error": ""}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        gpu = pool.submit(hardware)
+        result["memory"] = memory(procs, endpoint)
+        try:
+            client = Client(endpoint)
+            router, models = catalog(client)
+            result.update(online=True, router=router, models=models)
+            active = [(m, pool.submit(model_stats, client, m, router)) for m in models if m["state"] == "loaded"]
+            for model, future in active:
+                model.update(future.result())
+        except BackendError as exc:
+            result["error"] = str(exc)
+        result["gpus"] = gpu.result()
+    return result
+
+
+def control(endpoint, action, model):
+    endpoint = discover(endpoint, processes())
+    client = Client(endpoint)
+    router, models = catalog(client)
+    if not router:
+        raise BackendError("Model switching requires llama.cpp router mode (--models-preset or --models-dir).")
+    selected = next((m for m in models if m["id"] == model), None)
+    if not selected:
+        raise BackendError("Model is not in this server's catalog; refresh the panel.")
+    if any(m["state"] in ("loading", "downloading", "unloading") for m in models):
+        raise BackendError("A model operation is already in progress. Wait for it to finish.")
+    # Do not knowingly interrupt an active request. The router remains authoritative;
+    # a request arriving after this check can still race with a model change.
+    for loaded in models:
+        if loaded["state"] == "loaded" and (action == "switch" or loaded["id"] == model):
+            query = urllib.parse.urlencode({"model": loaded["id"], "autoload": "false"})
+            slots = client.request("/slots?" + query)
+            if not isinstance(slots, list):
+                raise BackendError("Cannot verify whether the model is busy.")
+            if any(slot.get("is_processing") for slot in slots):
+                raise BackendError("Model is generating. Wait until the active request finishes.")
+    if action == "switch" and selected["state"] == "loaded":
+        return {"success": True, "message": model + " is already loaded"}
+    # Let the router's --models-max eviction policy select which resident model to
+    # unload. Never kill processes or restart services owned by another program.
+    path = "/models/load" if action == "switch" else "/models/unload"
+    response = client.request(path, {"model": model}, timeout=180)
+    if response.get("success") is not True:
+        raise BackendError("Router did not confirm the operation: " + json.dumps(response))
+    return {"success": True, "message": ("Loaded " if action == "switch" else "Unloaded ") + model}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--endpoint", default="auto", help="loopback URL, or auto (default)")
+    parser.add_argument("action", choices=("status", "switch", "unload"), nargs="?", default="status")
+    parser.add_argument("model", nargs="?")
+    args = parser.parse_args()
+    try:
+        if args.action == "status":
+            result = snapshot(args.endpoint)
+        else:
+            if not args.model:
+                parser.error("switch and unload require a model ID")
+            runtime = Path(os.environ.get("XDG_RUNTIME_DIR", str(Path.home() / ".cache"))) / "llama-local"
+            runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with (runtime / "control.lock").open("w") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise BackendError("Another model operation is still running.") from exc
+                result = control(args.endpoint, args.action, args.model)
+        print(json.dumps(result, allow_nan=False))
+    except BackendError as exc:
+        print(json.dumps({"success": False, "error": str(exc)}))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

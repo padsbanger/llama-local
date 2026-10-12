@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "strielok.llama-local",
+  "name": "Llama Local",
+  "version": "0.1.0",
+  "author": "strielok",
+  "license": "MIT",
+  "description": "Monitor and switch models on an existing local llama.cpp server.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "Llama Local",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {"endpoint": "auto", "pollSeconds": 3},
+    "schema": [
+      {"key": "endpoint", "type": "string", "label": "Server URL (or auto)"},
+      {"key": "pollSeconds", "type": "number", "label": "Refresh interval (seconds)"}
+    ]
+  }
+}
