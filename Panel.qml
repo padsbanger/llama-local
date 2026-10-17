@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -16,6 +17,17 @@ Panel {
   readonly property string endpoint: String(setting("endpoint", "auto"))
   readonly property var models: snapshot.models || []
   readonly property var activeModels: models.filter(function(m) { return m.state === "loaded" })
+  readonly property string serverStatus: {
+    if (operation.running) return operationAction === "switch" ? "Loading" : "Unloading"
+    if (!snapshot.online) return "Offline"
+    if (models.some(function(m) { return m.state === "loading" || m.state === "downloading" })) return "Loading"
+    if (models.some(function(m) { return m.state === "unloading" })) return "Unloading"
+    if (activeModels.some(function(m) { return (m.slots || []).some(function(s) { return s.busy }) })) return "Working"
+    if (!activeModels.length) return "Standby"
+    if (activeModels.some(function(m) { return !m.slots || (m.notes || []).some(function(n) { return n.indexOf("Slot information unavailable") === 0 }) })) return "Unknown"
+    return "Idle"
+  }
+  readonly property bool serverWorking: ["Working", "Loading", "Unloading"].indexOf(serverStatus) >= 0
   readonly property color ink: Color.foreground
   readonly property color muted: Util.alpha(ink, 0.65)
   property var snapshot: ({ online: false, router: false, models: [] })
@@ -23,7 +35,11 @@ Panel {
   property string notice: ""
   property string pendingModel: ""
   property string pendingAction: ""
-  property int selectedIndex: 0
+  property string selectedModel: ""
+  readonly property int selectedIndex: models.findIndex(function(m) { return m.id === selectedModel })
+  property string expandedModel: ""
+  property string operationModel: ""
+  property string operationAction: ""
   property bool refreshQueued: false
   readonly property var usage: snapshot.usage || ({ days: [] })
   readonly property var usageDays: usage.days || []
@@ -46,30 +62,71 @@ Panel {
     poll.command = ["python3", cli, "--endpoint", endpoint, "status"]
     poll.running = true
   }
+  function actionReason(model, action) {
+    if (!model) return "Select a model."
+    if (operation.running) return "Wait for the current operation."
+    if (!snapshot.online) return "Server is unavailable."
+    if (!snapshot.router) return "Switching requires router mode."
+    if (models.some(function(m) { return ["loading", "downloading", "unloading"].indexOf(m.state) >= 0 }))
+      return "Wait for the model transition to finish."
+    if (action === "switch" && ["unloaded", "sleeping"].indexOf(model.state) < 0)
+      return model.state === "loaded" ? "Model is already loaded." : "Model cannot be loaded in its current state."
+    if (action === "unload" && model.state !== "loaded") return "Model is not loaded."
+    var affected = activeModels.filter(function(m) { return action === "switch" || m.id === model.id })
+    if (affected.some(function(m) { return (m.slots || []).some(function(slot) { return slot.busy }) }))
+      return "Model is generating. Wait for the request to finish."
+    if (affected.some(function(m) { return (m.notes || []).some(function(n) { return n.indexOf("Slot information unavailable") === 0 }) }))
+      return "Slot information is unavailable; cannot verify whether the model is busy."
+    return ""
+  }
+  function revealSelection() {
+    var row = modelRows.itemAt(selectedIndex)
+    if (!row) return
+    var y = row.mapToItem(content, 0, 0).y
+    scroll.contentY = Math.max(0, Math.min(y, scroll.contentHeight - scroll.height))
+  }
   function choose(model, action) {
-    if (operation.running || !snapshot.router || !model) return
+    var reason = actionReason(model, action)
+    if (reason) { problem = reason; pendingModel = ""; return }
+    selectedModel = model.id
     pendingModel = model.id
     pendingAction = action
     problem = ""
     notice = ""
+    Qt.callLater(revealSelection)
   }
   function execute() {
-    if (operation.running || !pendingModel) return
+    var model = models.find(function(m) { return m.id === pendingModel })
+    var reason = actionReason(model, pendingAction)
+    if (reason) { problem = reason; pendingModel = ""; return }
     operation.command = ["python3", cli, "--endpoint", snapshot.endpoint, pendingAction, pendingModel]
-    notice = (pendingAction === "switch" ? "Loading " : "Unloading ") + pendingModel + "…"
+    operationModel = pendingModel
+    operationAction = pendingAction
+    notice = ""
     pendingModel = ""
     operation.running = true
   }
+  function activateSelected() {
+    if (pendingModel) { execute(); return }
+    var model = models[selectedIndex]
+    if (model && model.state === "loaded") {
+      expandedModel = expandedModel === model.id ? "" : model.id
+      Qt.callLater(revealSelection)
+    } else choose(model, "switch")
+  }
   function move(delta) {
     if (!models.length) return
-    selectedIndex = (selectedIndex + delta + models.length) % models.length
-    var row = modelRows.itemAt(selectedIndex)
-    if (row) {
-      var y = row.mapToItem(content, 0, 0).y
-      scroll.contentY = Math.max(0, Math.min(y - 80, scroll.contentHeight - scroll.height))
-    }
+    pendingModel = ""
+    selectedModel = models[(selectedIndex + delta + models.length) % models.length].id
+    Qt.callLater(revealSelection)
   }
-  onOpenedChanged: if (opened) refresh()
+  onSelectedModelChanged: if (pendingModel && pendingModel !== selectedModel) pendingModel = ""
+  onModelsChanged: {
+    if (!models.some(function(m) { return m.id === selectedModel }))
+      selectedModel = models.length ? models[0].id : ""
+    if (pendingModel && !models.some(function(m) { return m.id === pendingModel })) pendingModel = ""
+  }
+  onOpenedChanged: { if (opened) refresh(); else pendingModel = "" }
   onEndpointChanged: Qt.callLater(function() { root.snapshot = ({ online: false, router: false, models: [] }); root.pendingModel = ""; root.refresh() })
 
   Process {
@@ -83,7 +140,6 @@ Panel {
         var result = JSON.parse(pollOut.text)
         if (code !== 0) throw new Error(result.error || "Status command failed")
         root.snapshot = result
-        root.selectedIndex = Math.min(root.selectedIndex, Math.max(0, root.models.length - 1))
       } catch (e) {
         root.snapshot = ({ online: false, error: "Monitor failed: " + e.message, models: [] })
       }
@@ -114,9 +170,63 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.bar && root.bar.vertical ? "AI" : "AI · " + (operation.running ? "…" : root.snapshot.online ? (root.activeModels.length ? "" + root.activeModels.length : "idle") : "off")
-    dimmed: !root.snapshot.online
-    tooltipText: "Llama Omarchy\n" + (root.activeModels.map(function(m) { return m.id }).join(", ") || root.snapshot.error || "No model loaded")
+    hasVisualContent: true
+    labelVisible: false
+    fixedWidth: vertical ? barSize : barContents.implicitWidth + scaledHorizontalMargin * 2
+    fixedHeight: vertical ? Style.space(28) + scaledVerticalPadding * 2 : barSize
+    tooltipText: "llama.cpp · " + root.serverStatus + "\n" + (root.activeModels.map(function(m) { return m.id }).join(", ") || root.snapshot.error || "No model loaded")
+    Row {
+      id: barContents
+      anchors.centerIn: parent
+      spacing: Style.space(6)
+      Image {
+        id: llamaLogo
+        width: Style.space(24)
+        height: width
+        anchors.verticalCenter: parent.verticalCenter
+        source: Qt.resolvedUrl("assets/llama.cpp.svg")
+        sourceSize.width: width * 2
+        sourceSize.height: height * 2
+        fillMode: Image.PreserveAspectFit
+        layer.enabled: true
+        layer.effect: MultiEffect {
+          colorization: 1.0
+          colorizationColor: button.foreground
+        }
+        opacity: root.serverStatus === "Offline" ? 0.45 : 1
+      }
+      Rectangle {
+        id: statusDot
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(6)
+        height: width
+        radius: width / 2
+        color: root.serverStatus === "Offline" ? Color.urgent : root.serverWorking ? Color.accent : root.serverStatus === "Idle" ? button.foreground : "transparent"
+        border.width: root.serverStatus === "Standby" || root.serverStatus === "Unknown" ? 1 : 0
+        border.color: button.foreground
+        visible: !button.vertical
+      }
+      Text {
+        visible: !button.vertical
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.serverStatus
+        textFormat: Text.PlainText
+        color: button.foreground
+        font.family: button.fontFamily
+        font.pixelSize: button.fontSize
+      }
+    }
+    Rectangle {
+      visible: button.vertical
+      anchors.right: barContents.right
+      anchors.bottom: barContents.bottom
+      width: Style.space(6)
+      height: width
+      radius: width / 2
+      color: statusDot.color
+      border.width: statusDot.border.width
+      border.color: statusDot.border.color
+    }
     onPressed: root.toggle()
   }
 
@@ -137,10 +247,7 @@ Panel {
       onCloseRequested: { if (root.pendingModel) root.pendingModel = ""; else root.close() }
       onMoveRequested: function(dx, dy) { root.move(dy || dx) }
       onTabRequested: function(direction) { root.move(direction) }
-      onActivateRequested: {
-        if (root.pendingModel) root.execute()
-        else root.choose(root.models[root.selectedIndex], "switch")
-      }
+      onActivateRequested: root.activateSelected()
       onDeleteRequested: root.choose(root.models[root.selectedIndex], "unload")
       onTextKey: function(text) { if (text === "r") root.refresh() }
 
@@ -171,6 +278,130 @@ Panel {
           Label { width: parent.width; visible: text !== ""; text: root.problem || root.snapshot.error || ""; color: Color.urgent; wrapMode: Text.Wrap }
           Label { width: parent.width; visible: text !== ""; text: root.notice; wrapMode: Text.Wrap }
           Rule {}
+          Label { text: "MODELS"; color: root.muted }
+          Label { width: parent.width; visible: !root.models.length; text: "No models found. Start llama-server or check the endpoint in widget settings."; wrapMode: Text.Wrap }
+          Repeater {
+            id: modelRows
+            model: root.models
+            delegate: Rectangle {
+              id: modelRow
+              required property var modelData
+              required property int index
+              readonly property var metrics: modelData.metrics || ({})
+              readonly property bool loaded: modelData.state === "loaded"
+              readonly property bool busy: (modelData.slots || []).some(function(s) { return s.busy })
+              readonly property string loadReason: root.actionReason(modelData, "switch")
+              readonly property string unloadReason: root.actionReason(modelData, "unload")
+              width: content.width
+              height: modelBody.height + Style.space(16)
+              radius: Style.cornerRadius
+              color: Util.alpha(root.ink, root.selectedIndex === index ? 0.10 : 0.04)
+              border.width: root.selectedIndex === index ? 1 : 0
+              border.color: Util.alpha(root.ink, 0.25)
+              Column {
+                id: modelBody
+                x: Style.space(10); y: Style.space(8)
+                width: parent.width - Style.space(20)
+                spacing: Style.space(6)
+                Label { width: parent.width; text: modelRow.modelData.id; elide: Text.ElideMiddle; font.bold: true }
+                RowLayout {
+                  width: parent.width
+                  Label {
+                    Layout.fillWidth: true
+                    text: modelRow.modelData.failed ? "Failed to load" : modelRow.loaded ? (modelRow.busy ? "Generating" : "Loaded · idle") : modelRow.modelData.state
+                    color: modelRow.modelData.state === "loaded" ? Color.accent : root.muted
+                  }
+                  Button {
+                    visible: !!root.snapshot.router && modelRow.modelData.state === "loaded"
+                    text: "Unload"; enabled: modelRow.unloadReason === ""
+                    tooltipText: modelRow.unloadReason
+                    onClicked: { root.selectedModel = modelRow.modelData.id; root.choose(modelRow.modelData, "unload") }
+                  }
+                  Button {
+                    visible: !!root.snapshot.router && modelRow.modelData.state !== "loaded"
+                    text: "Load"; enabled: modelRow.loadReason === ""
+                    tooltipText: modelRow.loadReason
+                    onClicked: { root.selectedModel = modelRow.modelData.id; root.choose(modelRow.modelData, "switch") }
+                  }
+                }
+                Stat {
+                  visible: modelRow.loaded
+                  label: "Generation throughput"
+                  value: root.amount(modelRow.metrics.predicted_tokens_seconds, " tok/s", 1)
+                }
+                Label {
+                  width: parent.width
+                  visible: operation.running && root.operationModel === modelRow.modelData.id
+                  text: root.operationAction === "switch" ? "Loading…" : "Unloading…"
+                  color: Color.accent
+                }
+                Column {
+                  width: parent.width
+                  visible: root.pendingModel === modelRow.modelData.id
+                  spacing: Style.space(8)
+                  Label {
+                    width: parent.width
+                    text: root.pendingAction === "switch" ? "Load this model? The router may evict another model. Clients still choose their own model ID." : "Unload this model and free its memory?"
+                    wrapMode: Text.Wrap
+                  }
+                  Label {
+                    width: parent.width
+                    text: root.actionReason(modelRow.modelData, root.pendingAction)
+                    visible: text !== ""
+                    color: root.muted
+                    wrapMode: Text.Wrap
+                  }
+                  Row {
+                    spacing: Style.space(8)
+                    Button {
+                      text: "Confirm"; bordered: true
+                      enabled: root.actionReason(modelRow.modelData, root.pendingAction) === ""
+                      tooltipText: root.actionReason(modelRow.modelData, root.pendingAction)
+                      onClicked: root.execute()
+                    }
+                    Button { text: "Cancel"; onClicked: root.pendingModel = "" }
+                  }
+                }
+                Button {
+                  visible: modelRow.loaded
+                  text: root.expandedModel === modelRow.modelData.id ? "Hide details" : "Show details"
+                  onClicked: {
+                    root.selectedModel = modelRow.modelData.id
+                    root.expandedModel = root.expandedModel === modelRow.modelData.id ? "" : modelRow.modelData.id
+                  }
+                }
+                Column {
+                  width: parent.width
+                  visible: modelRow.loaded && root.expandedModel === modelRow.modelData.id
+                  spacing: Style.space(8)
+                  Stat { label: "Prompt tokens processed"; value: root.amount(modelRow.metrics.prompt_tokens_total) }
+                  Stat { label: "Prompt tokens cached"; value: root.amount(modelRow.metrics.prompt_tokens_cached_total) }
+                  Stat { label: "Output tokens"; value: root.amount(modelRow.metrics.tokens_predicted_total) }
+                  Repeater {
+                    model: modelRow.modelData.slots || []
+                    delegate: Column {
+                      required property var modelData
+                      width: modelBody.width
+                      spacing: Style.space(5)
+                      Stat { label: "Slot " + parent.modelData.id + (parent.modelData.busy ? " · generating" : " · idle"); value: root.amount(parent.modelData.prompt_tokens) + " / " + root.amount(parent.modelData.context_size) }
+                      Rectangle {
+                        width: parent.width; height: Style.space(4); radius: height / 2
+                        color: Util.alpha(root.ink, 0.10)
+                        Rectangle { width: parent.width * Math.min(1, (modelData.prompt_tokens || 0) / Math.max(1, modelData.context_size || 1)); height: parent.height; radius: height / 2; color: Color.accent }
+                      }
+                    }
+                  }
+                  Label { width: parent.width; text: "Counters since model load. Slot bars show current / last prompt against context capacity."; color: root.muted; wrapMode: Text.Wrap }
+                  Repeater {
+                    model: modelRow.modelData.notes || []
+                    delegate: Label { required property string modelData; width: modelBody.width; text: modelData; color: root.muted; wrapMode: Text.Wrap }
+                  }
+                }
+              }
+            }
+          }
+          Rule {}
+          Label { width: parent.width; visible: !!root.snapshot.online && !root.snapshot.router; text: "Switching requires router mode (--models-preset or --models-dir)."; color: root.muted; wrapMode: Text.Wrap }
           Column {
             id: activity
             width: parent.width
@@ -279,100 +510,6 @@ Panel {
             }
           }
           Rule {}
-          Label { text: "MODELS"; color: root.muted }
-          Label { width: parent.width; visible: !root.models.length; text: "No models found. Start llama-server or check the endpoint in widget settings."; wrapMode: Text.Wrap }
-          Repeater {
-            id: modelRows
-            model: root.models
-            delegate: Rectangle {
-              id: modelRow
-              required property var modelData
-              required property int index
-              width: content.width
-              height: modelBody.height + Style.space(16)
-              radius: Style.cornerRadius
-              color: Util.alpha(root.ink, root.selectedIndex === index ? 0.10 : 0.04)
-              border.width: root.selectedIndex === index ? 1 : 0
-              border.color: Util.alpha(root.ink, 0.25)
-              Column {
-                id: modelBody
-                x: Style.space(10); y: Style.space(8)
-                width: parent.width - Style.space(20)
-                spacing: Style.space(6)
-                Label { width: parent.width; text: modelRow.modelData.id; elide: Text.ElideMiddle; font.bold: true }
-                RowLayout {
-                  width: parent.width
-                  Label {
-                    Layout.fillWidth: true
-                    text: modelRow.modelData.failed ? "Failed to load" : modelRow.modelData.state
-                    color: modelRow.modelData.state === "loaded" ? Color.accent : root.muted
-                  }
-                  Button {
-                    visible: !!root.snapshot.router && modelRow.modelData.state === "loaded"
-                    text: "Unload"; enabled: !operation.running
-                    onClicked: { root.selectedIndex = modelRow.index; root.choose(modelRow.modelData, "unload") }
-                  }
-                  Button {
-                    visible: !!root.snapshot.router && modelRow.modelData.state !== "loaded"
-                    text: "Load"; enabled: !operation.running && ["unloaded", "sleeping"].indexOf(modelRow.modelData.state) >= 0
-                    onClicked: { root.selectedIndex = modelRow.index; root.choose(modelRow.modelData, "switch") }
-                  }
-                }
-              }
-            }
-          }
-          Label { width: parent.width; visible: !!root.snapshot.online && !root.snapshot.router; text: "Switching requires router mode (--models-preset or --models-dir)."; color: root.muted; wrapMode: Text.Wrap }
-          Column {
-            width: parent.width
-            visible: root.pendingModel !== ""
-            spacing: Style.space(8)
-            Label {
-              width: parent.width
-              text: (root.pendingAction === "switch" ? "Load " : "Unload ") + root.pendingModel + "? " + (root.pendingAction === "switch" ? "The router may evict another model to free memory. Clients still choose their own model ID." : "This frees the model's memory.")
-              wrapMode: Text.Wrap
-            }
-            Row {
-              spacing: Style.space(8)
-              Button { text: "Confirm"; bordered: true; enabled: !operation.running; onClicked: root.execute() }
-              Button { text: "Cancel"; onClicked: root.pendingModel = "" }
-            }
-          }
-          Repeater {
-            model: root.activeModels
-            delegate: Column {
-              id: stats
-              required property var modelData
-              readonly property var metrics: modelData.metrics || ({})
-              width: content.width
-              spacing: Style.space(8)
-              Rule {}
-              Label { width: parent.width; text: modelData.id + " · USAGE"; elide: Text.ElideMiddle; color: root.muted }
-              Stat { label: "Prompt tokens processed"; value: root.amount(stats.metrics.prompt_tokens_total) }
-              Stat { label: "Prompt tokens cached"; value: root.amount(stats.metrics.prompt_tokens_cached_total) }
-              Stat { label: "Output tokens"; value: root.amount(stats.metrics.tokens_predicted_total) }
-              Stat { label: "Generation throughput"; value: root.amount(stats.metrics.predicted_tokens_seconds, " tok/s", 1) }
-              Repeater {
-                model: stats.modelData.slots || []
-                delegate: Column {
-                  required property var modelData
-                  width: stats.width
-                  spacing: Style.space(5)
-                  Stat { label: "Slot " + parent.modelData.id + (parent.modelData.busy ? " · generating" : " · idle"); value: root.amount(parent.modelData.prompt_tokens) + " / " + root.amount(parent.modelData.context_size) }
-                  Rectangle {
-                    width: parent.width; height: Style.space(4); radius: height / 2
-                    color: Util.alpha(root.ink, 0.10)
-                    Rectangle { width: parent.width * Math.min(1, (modelData.prompt_tokens || 0) / Math.max(1, modelData.context_size || 1)); height: parent.height; radius: height / 2; color: Color.accent }
-                  }
-                }
-              }
-              Label { width: parent.width; text: "Counters since model load. Slot bars show current / last prompt against context capacity."; color: root.muted; wrapMode: Text.Wrap }
-              Repeater {
-                model: stats.modelData.notes || []
-                delegate: Label { required property string modelData; width: stats.width; text: modelData; color: root.muted; wrapMode: Text.Wrap }
-              }
-            }
-          }
-          Rule {}
           Label { text: "MEMORY"; color: root.muted }
           Stat { label: "llama.cpp process RAM (RSS)"; value: root.bytes((root.snapshot.memory || {}).server_rss_bytes) }
           Stat { label: "System RAM"; value: root.bytes((root.snapshot.memory || {}).used_bytes) + " / " + root.bytes((root.snapshot.memory || {}).total_bytes) }
@@ -392,7 +529,7 @@ Panel {
           }
           Label { width: parent.width; visible: !(root.snapshot.gpus || []).length; text: "GPU sensors unavailable. Missing measurements appear as —."; color: root.muted; wrapMode: Text.Wrap }
           Rule {}
-          Label { width: parent.width; text: "↑↓ select · Enter load · x unload · r refresh · Esc close"; color: root.muted; wrapMode: Text.Wrap }
+          Label { width: parent.width; text: "↑↓ select · Enter load / details · x unload · r refresh · Esc cancel / close"; color: root.muted; wrapMode: Text.Wrap }
         }
       }
     }

@@ -12,13 +12,17 @@ Requires Omarchy's Quickshell shell with plugin support, Python 3, and a running
 ./install.sh
 ```
 
-This links this directory into `~/.config/omarchy/plugins/strielok.llama-omarchy` and enables its bar widget. Keep this directory in place. It does not alter or restart llama.cpp. Click **AI** in the bar to open the panel. The panel follows your Omarchy theme and supports scrolling, arrow keys, Enter, `x` to unload, `r` to refresh, and Escape.
+Clone the repository anywhere, then run `./install.sh` from the checkout. The installer uses the current user's `${XDG_CONFIG_HOME:-~/.config}/omarchy/plugins/strielok.llama-omarchy` directory and enables its bar widget; no username or fixed checkout path is required. It links to this checkout, so keep the directory in place. It does not alter or restart llama.cpp. Click the **llama.cpp logo** in the bar to open the panel. The panel follows your Omarchy theme and supports scrolling, arrow keys, Enter, `x` to unload, `r` to refresh, and Escape.
+
+The bar shows a monochrome llama.cpp logo that follows the bar’s theme foreground, with a status dot and label: **Working**, **Idle**, **Standby** (no loaded model), **Loading**, **Unloading**, **Offline**, or **Unknown** (slot monitoring unavailable). Vertical bars show the logo and dot, with the status in the tooltip. The bundled logo is adapted to monochrome from llama.cpp’s `media/llama1-icon-transparent.svg`; its MIT notice is in `assets/llama.cpp-LICENSE`.
+
+Model cards appear above activity history, with live state and throughput. Expand a loaded model with **Show details** or Enter to see its counters and slots. Enter on an unloaded model requests a load; `x` requests an unload. Confirmations and operation progress appear inside the affected card. Moving to another model or closing the panel cancels a pending confirmation. Disabled actions explain why they are unavailable, and the backend rechecks before changing model residency.
 
 For removal:
 
 ```sh
 omarchy plugin disable strielok.llama-omarchy
-unlink ~/.config/omarchy/plugins/strielok.llama-omarchy
+unlink "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/strielok.llama-omarchy"
 omarchy-shell shell rescanPlugins
 ```
 
@@ -78,8 +82,9 @@ History is saved per endpoint in `${XDG_STATE_HOME:-~/.local/state}/llama-omarch
 ./bin/llama-omarchy unload qwen3-coder
 python3 -m unittest discover -s tests -v
 ./tests/qml-smoke.sh
+./tests/qml-smoke.sh --interactions
 ```
 
-CLI responses are JSON. A status snapshot reports offline/error state as data; rejected controls exit nonzero. Tests use a local mock router and never switch a real model. The QML smoke test loads the actual plugin in an isolated Quickshell process (panel closed; requires a Wayland session) with the installed Omarchy UI components.
+CLI responses are JSON. A status snapshot reports offline/error state as data; rejected controls exit nonzero. Tests use a local mock router and never switch a real model. The QML smoke test loads the actual plugin in an isolated Quickshell process (panel closed; requires a Wayland session) with the installed Omarchy UI components. The interaction test opens the panel using synthetic data and checks selection, expansion, confirmation, and action eligibility without contacting a server.
 
 API reference: [llama.cpp server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server). The plugin was checked against the installed Omarchy shell and llama.cpp b11574; older router versions may not expose all stats.
