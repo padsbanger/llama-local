@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+from datetime import date, timedelta
 import fcntl
 import io
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -253,6 +255,77 @@ def snapshot(endpoint="auto"):
     return result
 
 
+def usage_history(result, state, today=None):
+    """Accumulate observed counter deltas; never invent dates for old totals."""
+    today = today or date.today()
+    key = today.isoformat()
+    history = state.setdefault(result["endpoint"], {"days": {}, "counters": {}})
+    days, counters = history["days"], history["counters"]
+    observed = False
+    if result["online"]:
+        loaded = {m["id"] for m in result["models"] if m["state"] == "loaded"}
+        for model_id in list(counters):
+            if model_id not in loaded:
+                del counters[model_id]
+        for model in result["models"]:
+            if model["state"] != "loaded":
+                continue
+            previous = counters.setdefault(model["id"], {})
+            for metric, field in (("prompt_tokens_total", "prompt"), ("tokens_predicted_total", "output")):
+                value = number(model.get("metrics", {}).get(metric))
+                if value is None or value < 0:
+                    continue
+                observed = True
+                day = days.setdefault(key, {"prompt": 0, "output": 0})
+                # A decreasing counter indicates a reset. Missing samples keep
+                # their baseline; newly observed models establish a baseline.
+                if field in previous:
+                    day[field] += int(value - previous[field] if value >= previous[field] else value)
+                previous[field] = value
+    start = today - timedelta(days=today.weekday() + 25 * 7)
+    history["days"] = {d: v for d, v in days.items() if d >= start.isoformat()}
+    cells = []
+    for offset in range(26 * 7):
+        current = start + timedelta(days=offset)
+        values = history["days"].get(current.isoformat())
+        cells.append({"date": current.isoformat(), "future": current > today,
+                      "prompt": values["prompt"] if values else None,
+                      "output": values["output"] if values else None,
+                      "total": sum(values.values()) if values else None})
+    return {"days": cells, "observing": observed,
+            "total": sum(c["total"] or 0 for c in cells),
+            "today": days.get(key), "error": ""}
+
+
+def tracked_snapshot(endpoint="auto", directory=None):
+    directory = directory or Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "llama-local"
+    result = None
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Serialize sampling as well as writes so concurrent CLI/UI polls cannot
+        # apply stale counters or count the same increment twice.
+        with (directory / "usage.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = snapshot(endpoint)
+            path = directory / "usage.json"
+            state = json.loads(path.read_text()) if path.exists() else {}
+            result["usage"] = usage_history(result, state)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+                    temporary = stream.name
+                    json.dump(state, stream, allow_nan=False)
+                os.replace(temporary, path)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        if result is None:
+            result = snapshot(endpoint)
+        result["usage"] = {"days": [], "error": "Usage history unavailable: " + str(exc)}
+    return result
+
+
 def control(endpoint, action, model):
     endpoint = discover(endpoint, processes())
     client = Client(endpoint)
@@ -293,7 +366,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.action == "status":
-            result = snapshot(args.endpoint)
+            result = tracked_snapshot(args.endpoint)
         else:
             if not args.model:
                 parser.error("switch and unload require a model ID")

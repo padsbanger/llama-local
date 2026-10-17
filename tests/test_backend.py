@@ -1,7 +1,9 @@
 import importlib.machinery
 import importlib.util
 import json
+from datetime import date
 from pathlib import Path
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +46,61 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'{"success":true}')
+
+
+class UsageTests(unittest.TestCase):
+    def sample(self, prompt=100, output=20, endpoint="http://localhost:8080"):
+        return {"endpoint": endpoint, "online": True, "models": [
+            {"id": "a", "state": "loaded", "metrics": {
+                "prompt_tokens_total": prompt, "tokens_predicted_total": output}}]}
+
+    def test_baseline_deltas_midnight_and_reset(self):
+        state = {}
+        first = backend.usage_history(self.sample(), state, date(2026, 10, 11))
+        self.assertEqual(first["total"], 0)
+        backend.usage_history(self.sample(130, 25), state, date(2026, 10, 11))
+        same = backend.usage_history(self.sample(130, 25), state, date(2026, 10, 11))
+        self.assertEqual(same["total"], 35)
+        next_day = backend.usage_history(self.sample(140, 30), state, date(2026, 10, 12))
+        self.assertEqual(next_day["today"], {"prompt": 10, "output": 5})
+        reset = backend.usage_history(self.sample(2, 3), state, date(2026, 10, 12))
+        self.assertEqual(reset["total"], 55)
+        self.assertEqual(len(reset["days"]), 182)
+        self.assertEqual(date.fromisoformat(reset["days"][0]["date"]).weekday(), 0)
+        self.assertIsNone(reset["days"][0]["total"])
+        self.assertTrue(reset["days"][-1]["future"])
+
+    def test_missing_metrics_offline_and_endpoint_isolation(self):
+        state = {}
+        backend.usage_history(self.sample(), state)
+        missing = backend.usage_history(self.sample(None, None), state)
+        self.assertFalse(missing["observing"])
+        offline = self.sample()
+        offline.update(online=False, models=[])
+        backend.usage_history(offline, state)
+        self.assertEqual(backend.usage_history(self.sample(105, 23), state)["total"], 8)
+        self.assertEqual(backend.usage_history(self.sample(200, 100, "http://localhost:9000"), state)["total"], 0)
+
+    def test_unloaded_model_rebaselines_and_retains_history(self):
+        state = {}
+        backend.usage_history(self.sample(), state)
+        backend.usage_history(self.sample(110, 25), state)
+        unloaded = self.sample()
+        unloaded["models"][0]["state"] = "unloaded"
+        backend.usage_history(unloaded, state)
+        self.assertEqual(backend.usage_history(self.sample(500, 100), state)["total"], 15)
+
+    def test_persistence_and_corrupt_file_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            with patch.object(backend, "snapshot", side_effect=[self.sample(), self.sample(110, 25)]):
+                backend.tracked_snapshot(directory=directory)
+                self.assertEqual(backend.tracked_snapshot(directory=directory)["usage"]["total"], 15)
+            path = directory / "usage.json"
+            path.write_text("broken")
+            with patch.object(backend, "snapshot", return_value=self.sample()):
+                self.assertIn("unavailable", backend.tracked_snapshot(directory=directory)["usage"]["error"])
+            self.assertEqual(path.read_text(), "broken")
 
 
 class BackendTests(unittest.TestCase):

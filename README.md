@@ -65,6 +65,10 @@ Unavailable measurements display **—**, never fabricated zeroes. Containerized
 
 Enable token totals and throughput using `--metrics`. In a router preset file, add `metrics = true` under `[*]` so model workers inherit it, then reload/restart your server when convenient. Existing workers need to be recreated for the setting to take effect. Slot counts can be shown without metrics; if disabled, enable `--slots`. No prompts or generated content are collected or stored.
 
+The **Token Activity** contribution chart shows 26 weeks of daily processed prompt + output tokens, with today's split and hover details. Color intensity is relative to the busiest displayed day; outlined cells mean no observations, while dim filled cells mean an observed zero. Cached prompt tokens are excluded.
+
+History is saved per endpoint in `${XDG_STATE_HOME:-~/.local/state}/llama-local/usage.json` and survives shell restarts and model unloads. Each `status` poll records counter increases, dated in local time when observed. The first sample of a newly observed model establishes a baseline: existing totals cannot be dated reliably. Decreasing counters are treated as resets. Usage between polls, during downtime, or across undetected reloads can be missed; increments spanning midnight are assigned to the day observed. This is observed activity, not a complete billing ledger. No historical usage is backfilled, and no extra background service is installed.
+
 ## CLI and development
 
 ```sh
