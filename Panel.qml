@@ -7,12 +7,12 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "strielok.llama-local"
-  ipcTarget: "strielok.llama-local"
+  moduleName: "strielok.llama-omarchy"
+  ipcTarget: "strielok.llama-omarchy"
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/llama-local")).replace(/^file:\/\//, ""))
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/llama-omarchy")).replace(/^file:\/\//, ""))
   readonly property string endpoint: String(setting("endpoint", "auto"))
   readonly property var models: snapshot.models || []
   readonly property var activeModels: models.filter(function(m) { return m.state === "loaded" })
@@ -116,7 +116,7 @@ Panel {
     bar: root.bar
     text: root.bar && root.bar.vertical ? "AI" : "AI · " + (operation.running ? "…" : root.snapshot.online ? (root.activeModels.length ? "" + root.activeModels.length : "idle") : "off")
     dimmed: !root.snapshot.online
-    tooltipText: "Llama Local\n" + (root.activeModels.map(function(m) { return m.id }).join(", ") || root.snapshot.error || "No model loaded")
+    tooltipText: "Llama Omarchy\n" + (root.activeModels.map(function(m) { return m.id }).join(", ") || root.snapshot.error || "No model loaded")
     onPressed: root.toggle()
   }
 
@@ -162,7 +162,7 @@ Panel {
             Column {
               Layout.fillWidth: true
               spacing: Style.space(4)
-              Label { text: "LLAMA LOCAL"; font.bold: true; font.pixelSize: Style.font.body + 3 }
+              Label { text: "LLAMA OMARCHY"; font.bold: true; font.pixelSize: Style.font.body + 3 }
               Label { text: root.snapshot.online ? (root.snapshot.router ? "Connected · router" : "Connected · single model") : "Server offline"; color: root.snapshot.online ? Color.accent : root.muted }
             }
             Button { text: "↻"; tooltipText: "Refresh (r)"; enabled: !poll.running; onClicked: root.refresh() }

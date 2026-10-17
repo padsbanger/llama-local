@@ -9,7 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-loader = importlib.machinery.SourceFileLoader("backend", str(Path(__file__).resolve().parents[1] / "bin/llama-local"))
+loader = importlib.machinery.SourceFileLoader("backend", str(Path(__file__).resolve().parents[1] / "bin/llama-omarchy"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 backend = importlib.util.module_from_spec(spec)
 loader.exec_module(backend)

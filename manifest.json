@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "strielok.llama-local",
-  "name": "Llama Local",
+  "id": "strielok.llama-omarchy",
+  "name": "Llama Omarchy",
   "version": "0.1.0",
   "author": "strielok",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "Panel.qml"},
   "barWidget": {
-    "displayName": "Llama Local",
+    "displayName": "Llama Omarchy",
     "category": "AI",
     "allowMultiple": false,
     "defaultSection": "right",

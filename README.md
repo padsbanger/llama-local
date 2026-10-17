@@ -1,4 +1,4 @@
-# Llama Local
+# Llama Omarchy
 
 A small native Omarchy / Quickshell bar plugin for an **existing local llama.cpp server**. Detect the server, see its model catalog, load or unload a model, and monitor tokens, RAM, VRAM, GPU power, utilization, and temperature.
 
@@ -12,13 +12,13 @@ Requires Omarchy's Quickshell shell with plugin support, Python 3, and a running
 ./install.sh
 ```
 
-This links this directory into `~/.config/omarchy/plugins/strielok.llama-local` and enables its bar widget. Keep this directory in place. It does not alter or restart llama.cpp. Click **AI** in the bar to open the panel. The panel follows your Omarchy theme and supports scrolling, arrow keys, Enter, `x` to unload, `r` to refresh, and Escape.
+This links this directory into `~/.config/omarchy/plugins/strielok.llama-omarchy` and enables its bar widget. Keep this directory in place. It does not alter or restart llama.cpp. Click **AI** in the bar to open the panel. The panel follows your Omarchy theme and supports scrolling, arrow keys, Enter, `x` to unload, `r` to refresh, and Escape.
 
 For removal:
 
 ```sh
-omarchy plugin disable strielok.llama-local
-unlink ~/.config/omarchy/plugins/strielok.llama-local
+omarchy plugin disable strielok.llama-omarchy
+unlink ~/.config/omarchy/plugins/strielok.llama-omarchy
 omarchy-shell shell rescanPlugins
 ```
 
@@ -31,10 +31,10 @@ A published git repository with these files can also be installed with `omarchy 
 The bar entry in `~/.config/omarchy/shell.json` accepts:
 
 ```json
-{"id": "strielok.llama-local", "endpoint": "http://127.0.0.1:8080", "pollSeconds": 3}
+{"id": "strielok.llama-omarchy", "endpoint": "http://127.0.0.1:8080", "pollSeconds": 3}
 ```
 
-Only loopback endpoints are accepted. Requests ignore HTTP proxy variables and do not follow redirects. For an authenticated server, export `LLAMA_LOCAL_API_KEY` into the **Omarchy shell's environment** before it starts. Do not place credentials in the endpoint or widget settings.
+Only loopback endpoints are accepted. Requests ignore HTTP proxy variables and do not follow redirects. For an authenticated server, export `LLAMA_OMARCHY_API_KEY` into the **Omarchy shell's environment** before it starts. Do not place credentials in the endpoint or widget settings.
 
 The panel polls every 3 seconds when open (minimum 2) and every 15 seconds when closed. Polls do not overlap. Monitoring uses `autoload=false` and only queries stats for loaded models, so opening the panel never loads an idle model.
 
@@ -67,15 +67,15 @@ Enable token totals and throughput using `--metrics`. In a router preset file, a
 
 The **Token Activity** contribution chart shows 26 weeks of daily processed prompt + output tokens, with today's split and hover details. Color intensity is relative to the busiest displayed day; outlined cells mean no observations, while dim filled cells mean an observed zero. Cached prompt tokens are excluded.
 
-History is saved per endpoint in `${XDG_STATE_HOME:-~/.local/state}/llama-local/usage.json` and survives shell restarts and model unloads. Each `status` poll records counter increases, dated in local time when observed. The first sample of a newly observed model establishes a baseline: existing totals cannot be dated reliably. Decreasing counters are treated as resets. Usage between polls, during downtime, or across undetected reloads can be missed; increments spanning midnight are assigned to the day observed. This is observed activity, not a complete billing ledger. No historical usage is backfilled, and no extra background service is installed.
+History is saved per endpoint in `${XDG_STATE_HOME:-~/.local/state}/llama-omarchy/usage.json` and survives shell restarts and model unloads. Each `status` poll records counter increases, dated in local time when observed. The first sample of a newly observed model establishes a baseline: existing totals cannot be dated reliably. Decreasing counters are treated as resets. Usage between polls, during downtime, or across undetected reloads can be missed; increments spanning midnight are assigned to the day observed. This is observed activity, not a complete billing ledger. No historical usage is backfilled, and no extra background service is installed.
 
 ## CLI and development
 
 ```sh
-./bin/llama-local status
-./bin/llama-local --endpoint http://127.0.0.1:8080 status
-./bin/llama-local switch qwen3-coder
-./bin/llama-local unload qwen3-coder
+./bin/llama-omarchy status
+./bin/llama-omarchy --endpoint http://127.0.0.1:8080 status
+./bin/llama-omarchy switch qwen3-coder
+./bin/llama-omarchy unload qwen3-coder
 python3 -m unittest discover -s tests -v
 ./tests/qml-smoke.sh
 ```
