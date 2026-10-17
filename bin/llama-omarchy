@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -201,15 +202,29 @@ def memory(procs, endpoint):
             "server_rss_bytes": sum(p["rss_bytes"] for p in procs if p["pid"] in pids) if pids else None}
 
 
+def decoded_tokens(slot):
+    # /slots exposes numeric progress without retaining prompts or generated text.
+    progress = slot.get("next_token")
+    if isinstance(progress, list):
+        progress = progress[0] if progress else None
+    if not isinstance(progress, dict):
+        return None
+    value = number(progress.get("n_decoded"))
+    return value if value is not None and value >= 0 else None
+
+
 def model_stats(client, model, router):
     query = "?" + urllib.parse.urlencode({"model": model["id"], "autoload": "false"}) if router else ""
-    stats = {"slots": [], "metrics": {}, "notes": []}
+    stats = {"slots": [], "slots_available": False, "metrics": {}, "notes": []}
     try:
         slots = client.request("/slots" + query)
         if isinstance(slots, list):
+            stats["slots_available"] = True
+            stats["slots_sample_time"] = time.monotonic()
             stats["slots"] = [{"id": s.get("id"), "busy": bool(s.get("is_processing")),
-                               "prompt_tokens": s.get("n_prompt_tokens"), "context_size": s.get("n_ctx")}
-                              for s in slots]
+                               "prompt_tokens": s.get("n_prompt_tokens"), "context_size": s.get("n_ctx"),
+                               "task_id": s.get("id_task"),
+                               "decoded_tokens": decoded_tokens(s)} for s in slots]
     except BackendError:
         stats["notes"].append("Slot information unavailable (enable --slots).")
     try:

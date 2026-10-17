@@ -21,6 +21,31 @@ ShellRoot {
     running: true
     onTriggered: {
       try {
+        function sample(t, count, task) {
+          return { id: "test", state: "loaded", slots_available: true, slots_sample_time: t,
+            metrics: { predicted_tokens_seconds: 0 },
+            slots: [{ id: 0, task_id: task, busy: true, decoded_tokens: count }] }
+        }
+        var before = sample(100, 40, 1)
+        var after = sample(103, 130, 1)
+        check(plugin.generationRate(after, before) === 30, "Live rate must work while server gauge is zero")
+        check(plugin.generationRate(after, null) === null, "First sample must not fabricate a rate")
+        check(plugin.generationRate(sample(103, 200, 2), before) === null, "Task changes must rebaseline")
+        check(plugin.generationRate(sample(103, 20, 1), before) === null, "Counter resets must rebaseline")
+        check(plugin.generationRate(sample(100, 130, 1), before) === null, "Zero elapsed time must be rejected")
+        check(plugin.generationRate(sample(200, 130, 1), before) === null, "Stale samples must be rejected")
+        var missing = sample(103, null, 1)
+        check(plugin.generationRate(missing, before) === null, "Missing progress must not become zero")
+        check(plugin.generationText(sample(103, 0, 1)) === "Waiting for output", "Prefill must not imply stalled generation")
+        check(plugin.generationText(after) === "Measuring…", "Unmeasured busy slot needs a clear label")
+        before.slots.push({ id: 1, task_id: 2, busy: true, decoded_tokens: 10 })
+        after.slots.push({ id: 1, task_id: 2, busy: true, decoded_tokens: 40 })
+        check(plugin.generationRate(after, before) === 40, "Concurrent slot rates must be summed")
+        fixture([before])
+        plugin.applySnapshot({ online: true, endpoint: plugin.snapshot.endpoint, models: [after] })
+        check(plugin.models[0].generation_tps === 40, "Snapshot must attach the computed live rate")
+        plugin.applySnapshot({ online: true, endpoint: "http://127.0.0.1:2", models: [sample(106, 220, 1)] })
+        check(plugin.models[0].generation_tps === null, "Endpoint changes must rebaseline")
         var a = { id: "loaded-model-with-a-long-name-for-layout-testing", state: "loaded",
           metrics: { tokens_predicted_total: 1234, predicted_tokens_seconds: 42.5 },
           slots: [{ id: 0, busy: false, prompt_tokens: 100, context_size: 8192 }] }

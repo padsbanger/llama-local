@@ -58,7 +58,7 @@ Single-model servers can be monitored, but require router mode for switching. Th
 | --- | --- |
 | Prompt/output totals | Prometheus `/metrics`, since the current model process started; reset on unload/restart |
 | Cached prompt tokens | Separate server counter, when available; excluded from processed prompt tokens |
-| Generation throughput | Server-reported tokens/s over its metrics sampling bucket; may be zero while idle |
+| Live generation | Change in active slots’ generated-token counts divided by time between polls; summed across active slots with matching task IDs |
 | Slot prompt / capacity | `/slots`: current or last prompt against slot context capacity, not exact live KV occupancy |
 | llama.cpp RAM | Sum of RSS for the discovered server and its llama-server descendants; shared pages may count twice |
 | System RAM | `/proc/meminfo`: total minus available |
@@ -67,7 +67,9 @@ Single-model servers can be monitored, but require router mode for switching. Th
 
 Unavailable measurements display **—**, never fabricated zeroes. Containerized or otherwise undiscoverable server process RAM may be unavailable even if HTTP works.
 
-Enable token totals and throughput using `--metrics`. In a router preset file, add `metrics = true` under `[*]` so model workers inherit it, then reload/restart your server when convenient. Existing workers need to be recreated for the setting to take effect. Slot counts can be shown without metrics; if disabled, enable `--slots`. No prompts or generated content are collected or stored.
+Enable token totals using `--metrics`. In a router preset file, add `metrics = true` under `[*]` so model workers inherit it, then reload/restart your server when convenient. Existing workers need to be recreated for the setting to take effect. Slot counts can be shown without metrics; if disabled, enable `--slots`. No prompts or generated content are collected or stored.
+
+Live generation requires `--slots`. New requests show **Measuring…** until two samples of the same task are available; slots with no generated tokens show **Waiting for output**. Missing slot monitoring displays **—**. Rates average the polling interval (3 seconds open, 15 seconds closed by default). Requests that finish between polls are not included in the active-slot rate. The server’s `predicted_tokens_seconds` metric reflects completed-request sampling buckets and can be zero during generation, so it is not used for the live display.
 
 The **Token Activity** contribution chart shows 26 weeks of daily processed prompt + output tokens, with today's split and hover details. Color intensity is relative to the busiest displayed day; outlined cells mean no observations, while dim filled cells mean an observed zero. Cached prompt tokens are excluded.
 

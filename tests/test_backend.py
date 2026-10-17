@@ -27,7 +27,8 @@ class Handler(BaseHTTPRequestHandler):
             data = {"data": [{"id": "a", "status": {"value": "loaded"}},
                              {"id": "b / test", "status": {"value": "unloaded"}}]}
         elif self.path.startswith("/slots"):
-            data = [{"id": 0, "is_processing": self.server.busy, "n_prompt_tokens": 42, "n_ctx": 1024}]
+            data = [{"id": 0, "is_processing": self.server.busy, "n_prompt_tokens": 42, "n_ctx": 1024,
+                     "id_task": 7, "next_token": [{"n_decoded": 123}]}]
         elif self.path.startswith("/metrics"):
             self.send_response(200)
             self.end_headers()
@@ -122,6 +123,10 @@ class BackendTests(unittest.TestCase):
         with patch.object(backend, "hardware", return_value=[]), patch.object(backend, "processes", return_value=[]):
             result = backend.snapshot(self.endpoint)
         self.assertTrue(result["online"])
+        self.assertTrue(result["models"][0]["slots_available"])
+        self.assertGreater(result["models"][0]["slots_sample_time"], 0)
+        self.assertEqual(result["models"][0]["slots"][0]["decoded_tokens"], 123)
+        self.assertEqual(result["models"][0]["slots"][0]["task_id"], 7)
         self.assertEqual(result["models"][0]["metrics"]["tokens_predicted_total"], 8)
         self.assertNotIn("metrics", result["models"][1])
         for method, path, _ in self.server.requests:
@@ -155,6 +160,12 @@ class BackendTests(unittest.TestCase):
     def test_unload(self):
         backend.control(self.endpoint, "unload", "a")
         self.assertEqual(self.server.requests[-1], ("POST", "/models/unload", {"model": "a"}))
+
+    def test_slot_progress_missing_and_alternate_shapes(self):
+        for value in (None, [], {}, [{"n_decoded": -1}], [{"n_decoded": "NaN"}]):
+            self.assertIsNone(backend.decoded_tokens({"next_token": value}))
+        self.assertEqual(backend.decoded_tokens({"next_token": {"n_decoded": 0}}), 0)
+        self.assertEqual(backend.decoded_tokens({"next_token": [{"n_decoded": 42}]}), 42)
 
     def test_metrics_labeled_and_nonfinite(self):
         result = backend.parse_metrics('# comment\nllamacpp:prompt_tokens_total{slot="0"} 12\nllamacpp:prompt_tokens_total{slot="1"} 2\nllamacpp:bad NaN\nllamacpp:bad2 +Inf\nllamacpp:invalid wat\n')

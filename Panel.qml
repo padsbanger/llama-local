@@ -62,6 +62,41 @@ Panel {
     poll.command = ["python3", cli, "--endpoint", endpoint, "status"]
     poll.running = true
   }
+  function generationRate(model, previous) {
+    if (model.slots_available === false) return null
+    var slots = model.slots || []
+    var busy = slots.filter(function(s) { return s.busy })
+    if (!busy.length) return slots.length || model.slots_available ? 0 : null
+    if (!previous || previous.slots_available === false) return null
+    var elapsed = model.slots_sample_time - previous.slots_sample_time
+    if (!isFinite(elapsed) || elapsed <= 0 || elapsed > 60) return null
+    var tokens = 0
+    for (var slot of busy) {
+      var old = (previous.slots || []).find(function(s) { return s.id === slot.id })
+      if (!old || !old.busy || slot.task_id === null || slot.task_id === undefined || old.task_id !== slot.task_id
+          || slot.decoded_tokens === null || slot.decoded_tokens === undefined
+          || old.decoded_tokens === null || old.decoded_tokens === undefined
+          || slot.decoded_tokens < old.decoded_tokens) return null
+      tokens += slot.decoded_tokens - old.decoded_tokens
+    }
+    return tokens / elapsed
+  }
+  function applySnapshot(result) {
+    var previousModels = snapshot.endpoint === result.endpoint && snapshot.online ? models : []
+    for (var model of result.models || []) {
+      var previous = previousModels.find(function(m) { return m.id === model.id })
+      model.generation_tps = generationRate(model, previous)
+    }
+    snapshot = result
+  }
+  function generationText(model) {
+    if (model.slots_available === false) return "—"
+    var busy = (model.slots || []).filter(function(s) { return s.busy })
+    if (busy.length && busy.every(function(s) { return s.decoded_tokens === 0 })) return "Waiting for output"
+    if (model.generation_tps === null || model.generation_tps === undefined)
+      return busy.length ? "Measuring…" : "—"
+    return amount(model.generation_tps, " tok/s", 1)
+  }
   function actionReason(model, action) {
     if (!model) return "Select a model."
     if (operation.running) return "Wait for the current operation."
@@ -139,7 +174,7 @@ Panel {
         if (poll.requestEndpoint !== root.endpoint) { root.refreshQueued = false; Qt.callLater(root.refresh); return }
         var result = JSON.parse(pollOut.text)
         if (code !== 0) throw new Error(result.error || "Status command failed")
-        root.snapshot = result
+        root.applySnapshot(result)
       } catch (e) {
         root.snapshot = ({ online: false, error: "Monitor failed: " + e.message, models: [] })
       }
@@ -173,17 +208,17 @@ Panel {
     hasVisualContent: true
     labelVisible: false
     fixedWidth: vertical ? barSize : barContents.implicitWidth + scaledHorizontalMargin * 2
-    fixedHeight: vertical ? Style.space(28) + scaledVerticalPadding * 2 : barSize
+    fixedHeight: vertical ? Style.space(18) + scaledVerticalPadding * 2 : barSize
     tooltipText: "llama.cpp · " + root.serverStatus + "\n" + (root.activeModels.map(function(m) { return m.id }).join(", ") || root.snapshot.error || "No model loaded")
-    Row {
+    RowLayout {
       id: barContents
       anchors.centerIn: parent
-      spacing: Style.space(6)
+      spacing: Style.space(4)
       Image {
         id: llamaLogo
-        width: Style.space(24)
-        height: width
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.preferredWidth: Style.space(18)
+        Layout.preferredHeight: Style.space(18)
+        Layout.alignment: Qt.AlignVCenter
         source: Qt.resolvedUrl("assets/llama.cpp.svg")
         sourceSize.width: width * 2
         sourceSize.height: height * 2
@@ -195,20 +230,31 @@ Panel {
         }
         opacity: root.serverStatus === "Offline" ? 0.45 : 1
       }
-      Rectangle {
-        id: statusDot
-        anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(6)
-        height: width
-        radius: width / 2
-        color: root.serverStatus === "Offline" ? Color.urgent : root.serverWorking ? Color.accent : root.serverStatus === "Idle" ? button.foreground : "transparent"
-        border.width: root.serverStatus === "Standby" || root.serverStatus === "Unknown" ? 1 : 0
-        border.color: button.foreground
+      Item {
+        id: dotSlot
+        Layout.alignment: Qt.AlignVCenter
+        Layout.preferredWidth: Style.space(4)
+        Layout.preferredHeight: Style.space(18)
         visible: !button.vertical
+        Rectangle {
+          id: statusDot
+          width: Style.space(4)
+          height: width
+          // Align to cap-height ink, not the line box (which includes descenders).
+          y: Math.round(statusLabel.y + statusLabel.baselineOffset
+             + statusCap.tightBoundingRect.y + statusCap.tightBoundingRect.height / 2
+             - dotSlot.y - height / 2)
+          radius: width / 2
+          antialiasing: true
+          color: root.serverStatus === "Offline" ? Color.urgent : root.serverWorking ? Color.accent : root.serverStatus === "Idle" ? button.foreground : "transparent"
+          border.width: root.serverStatus === "Standby" || root.serverStatus === "Unknown" ? 1 : 0
+          border.color: button.foreground
+        }
       }
       Text {
+        id: statusLabel
         visible: !button.vertical
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.alignment: Qt.AlignVCenter
         text: root.serverStatus
         textFormat: Text.PlainText
         color: button.foreground
@@ -216,11 +262,16 @@ Panel {
         font.pixelSize: button.fontSize
       }
     }
+    TextMetrics {
+      id: statusCap
+      font: statusLabel.font
+      text: "H"
+    }
     Rectangle {
       visible: button.vertical
       anchors.right: barContents.right
       anchors.bottom: barContents.bottom
-      width: Style.space(6)
+      width: Style.space(4)
       height: width
       radius: width / 2
       color: statusDot.color
@@ -326,8 +377,8 @@ Panel {
                 }
                 Stat {
                   visible: modelRow.loaded
-                  label: "Generation throughput"
-                  value: root.amount(modelRow.metrics.predicted_tokens_seconds, " tok/s", 1)
+                  label: "Live generation"
+                  value: root.generationText(modelRow.modelData)
                 }
                 Label {
                   width: parent.width
