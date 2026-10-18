@@ -270,7 +270,7 @@ def snapshot(endpoint="auto"):
     return result
 
 
-def usage_history(result, state, today=None):
+def usage_history(result, state, today=None, aggregate=False):
     """Accumulate observed counter deltas; never invent dates for old totals."""
     today = today or date.today()
     key = today.isoformat()
@@ -299,17 +299,28 @@ def usage_history(result, state, today=None):
                 previous[field] = value
     start = today - timedelta(days=today.weekday() + 25 * 7)
     history["days"] = {d: v for d, v in days.items() if d >= start.isoformat()}
+    # Auto-discovered servers can get a new port on every launch. Keep their
+    # counter baselines separate, but display all saved observations together.
+    # Derive this view without rewriting old records or migrating counters.
+    display_days = {}
+    histories = state.values() if aggregate else [history]
+    for saved in histories:
+        for day, values in saved["days"].items():
+            if start.isoformat() <= day <= key:
+                totals = display_days.setdefault(day, {"prompt": 0, "output": 0})
+                for field in ("prompt", "output"):
+                    totals[field] += values[field]
     cells = []
     for offset in range(26 * 7):
         current = start + timedelta(days=offset)
-        values = history["days"].get(current.isoformat())
+        values = display_days.get(current.isoformat())
         cells.append({"date": current.isoformat(), "future": current > today,
                       "prompt": values["prompt"] if values else None,
                       "output": values["output"] if values else None,
                       "total": sum(values.values()) if values else None})
     return {"days": cells, "observing": observed,
             "total": sum(c["total"] or 0 for c in cells),
-            "today": days.get(key), "error": ""}
+            "today": display_days.get(key), "error": ""}
 
 
 def tracked_snapshot(endpoint="auto", directory=None):
@@ -324,7 +335,7 @@ def tracked_snapshot(endpoint="auto", directory=None):
             result = snapshot(endpoint)
             path = directory / "usage.json"
             state = json.loads(path.read_text()) if path.exists() else {}
-            result["usage"] = usage_history(result, state)
+            result["usage"] = usage_history(result, state, aggregate=endpoint == "auto")
             temporary = None
             try:
                 with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:

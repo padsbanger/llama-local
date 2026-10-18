@@ -1,7 +1,7 @@
 import importlib.machinery
 import importlib.util
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import tempfile
 import threading
@@ -102,6 +102,49 @@ class UsageTests(unittest.TestCase):
             with patch.object(backend, "snapshot", return_value=self.sample()):
                 self.assertIn("unavailable", backend.tracked_snapshot(directory=directory)["usage"]["error"])
             self.assertEqual(path.read_text(), "broken")
+
+    def test_auto_history_survives_restart_with_new_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            old_endpoint = "http://127.0.0.1:58167"
+            new_endpoint = "http://127.0.0.1:59849"
+            yesterday = date.today() - timedelta(days=1)
+            # Existing on-disk format from before the fix / computer restart.
+            state = {}
+            backend.usage_history(self.sample(endpoint=old_endpoint), state, yesterday)
+            backend.usage_history(self.sample(110, 25, old_endpoint), state, yesterday)
+            path = directory / "usage.json"
+            path.write_text(json.dumps(state))
+            with patch.object(backend, "snapshot", return_value=self.sample(500, 100, new_endpoint)):
+                usage = backend.tracked_snapshot(directory=directory)["usage"]
+            self.assertEqual(usage["total"], 15)
+            self.assertEqual(next(d for d in usage["days"] if d["date"] == yesterday.isoformat())["total"], 15)
+            self.assertEqual(usage["today"], {"prompt": 0, "output": 0})
+            with patch.object(backend, "snapshot", return_value=self.sample(505, 103, new_endpoint)):
+                for _ in range(2):
+                    usage = backend.tracked_snapshot(directory=directory)["usage"]
+                    self.assertEqual(usage["total"], 23)
+                    self.assertEqual(usage["today"], {"prompt": 5, "output": 3})
+                explicit = backend.tracked_snapshot(endpoint=new_endpoint, directory=directory)
+                self.assertEqual(explicit["usage"]["total"], 8)
+            offline = {"endpoint": "http://127.0.0.1:8080", "online": False, "models": []}
+            with patch.object(backend, "snapshot", return_value=offline):
+                self.assertEqual(backend.tracked_snapshot(directory=directory)["usage"]["total"], 23)
+            self.assertEqual(json.loads(path.read_text())[old_endpoint], state[old_endpoint])
+
+    def test_auto_history_combines_same_day_and_filters_old_records(self):
+        state = {}
+        today = date(2026, 10, 18)
+        for endpoint in ("http://localhost:8000", "http://localhost:9000"):
+            backend.usage_history(self.sample(endpoint=endpoint), state, today)
+            backend.usage_history(self.sample(110, 25, endpoint), state, today)
+        state["http://localhost:8000"]["days"]["2025-01-01"] = {"prompt": 999, "output": 999}
+        offline = {"endpoint": "http://localhost:8080", "online": False, "models": []}
+        usage = backend.usage_history(offline, state, today, aggregate=True)
+        self.assertEqual(usage["total"], 30)
+        self.assertEqual(usage["today"], {"prompt": 20, "output": 10})
+        self.assertEqual(len(usage["days"]), 182)
+        self.assertIsNone(usage["days"][0]["total"])
 
 
 class BackendTests(unittest.TestCase):
